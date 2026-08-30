@@ -235,16 +235,120 @@ def extract_color(color_image_path, seg_image_path, save_path):
 
 def colorize_target_image(color_list_pred, image_tgt, seg_image_tgt):
 
-    image_tgt = image_tgt.permute(1,2,0)
-    combined_image = torch.zeros_like(image_tgt, device=image_tgt.device) 
+    # --------------------------------------------------------
+    # image_tgt:
+    # [C, H, W]
+    #
+    # 当前输入是 RGB，因此这里得到：
+    # [H, W, 3]
+    # --------------------------------------------------------
+
+    image_tgt = image_tgt.permute(1, 2, 0)
+
+    num_channels = image_tgt.shape[-1]
+
+    combined_image = torch.zeros_like(
+        image_tgt,
+        device=image_tgt.device
+    )
+
+    # --------------------------------------------------------
+    # DACoN 的 color_list_pred 是 RGBA
+    #
+    # 目标 image_tgt 可能是 RGB。
+    #
+    # 如果：
+    #     color = RGBA
+    #     target = RGB
+    #
+    # 则只使用 color 的 RGB 三个通道。
+    # --------------------------------------------------------
 
     for i, color in enumerate(color_list_pred):
-        mask = seg_image_tgt == i+1
-        mask = mask.unsqueeze(-1).expand(-1, -1, 4).bool()
-        combined_image = torch.where(mask, color/255, combined_image)
-    
-    black_mask = (image_tgt == torch.tensor([0, 0, 0, 1], device=image_tgt.device)).all(dim=-1)
+
+        mask = seg_image_tgt == i + 1
+
+        mask = mask.unsqueeze(-1).expand(
+            -1,
+            -1,
+            num_channels
+        ).bool()
+
+        # ----------------------------------------------------
+        # 模型输出 RGBA → RGB
+        # ----------------------------------------------------
+
+        if color.numel() == 4 and num_channels == 3:
+
+            color = color[:3]
+
+        # ----------------------------------------------------
+        # 模型输出 RGB → RGBA
+        # ----------------------------------------------------
+
+        elif color.numel() == 3 and num_channels == 4:
+
+            alpha = torch.tensor(
+                [255.0],
+                device=color.device,
+                dtype=color.dtype
+            )
+
+            color = torch.cat(
+                [color, alpha],
+                dim=0
+            )
+
+        # ----------------------------------------------------
+        # 如果仍然不匹配，直接报清楚
+        # ----------------------------------------------------
+
+        elif color.numel() != num_channels:
+
+            raise RuntimeError(
+                f"Color channel mismatch: "
+                f"color has {color.numel()} channels, "
+                f"but target image has {num_channels} channels."
+            )
+
+        combined_image = torch.where(
+            mask,
+            color / 255.0,
+            combined_image
+        )
+
+    # --------------------------------------------------------
+    # 保留原始黑色线条
+    # --------------------------------------------------------
+
+    if num_channels == 4:
+
+        black_mask = (
+            image_tgt
+            == torch.tensor(
+                [0, 0, 0, 1],
+                device=image_tgt.device,
+                dtype=image_tgt.dtype
+            )
+        ).all(dim=-1)
+
+    elif num_channels == 3:
+
+        black_mask = (
+            image_tgt
+            == torch.tensor(
+                [0, 0, 0],
+                device=image_tgt.device,
+                dtype=image_tgt.dtype
+            )
+        ).all(dim=-1)
+
+    else:
+
+        raise RuntimeError(
+            f"Unsupported image channel count: {num_channels}"
+        )
+
     combined_image[black_mask] = image_tgt[black_mask]
 
     return combined_image
-
