@@ -5,45 +5,42 @@ prepare_dacon_cut.py
 
 Prepare animation CUT data for DACoN inference.
 
-Input:
+DACoN directory layout used by Paint Assistant:
 
-G:\\paint_assistant\\ref_prj\\DATA\\CUT_01
-├── tga
-│   ├── b0001.tga
-│   ├── b0002.tga
-│   ├── b0003.tga
-│   └── ...
-│
-└── color_reference
-    └── b0002.tga
-
-Output:
-
-G:\\paint_assistant\\ref_prj\\DATA\\CUT_01_DACON\\CUT_01
-├── line
-│   ├── b0001.png
-│   ├── b0002.png
-│   └── ...
-│
-└── ref
-    ├── line
-    │   └── b0002.png
+    G:\paint_assistant\DATA\CUT_01_DACON\
+    ├── tga\
+    │   ├── b0001.tga
+    │   ├── b0002.tga
+    │   └── ...
+    ├── color_reference\
+    │   └── b0002.tga
     │
-    └── gt
-        └── b0002.png
+    └── CUT_01\
+        ├── line\
+        │   ├── b0001.png
+        │   ├── b0002.png
+        │   └── ...
+        ├── ref\
+        │   ├── line\
+        │   │   └── b0002.png
+        │   ├── gt\
+        │   │   └── b0002.png
+        │   └── seg\
+        ├── seg\
+        └── pred\
 
 IMPORTANT:
-
-1. RGB TGA -> RGB PNG
-2. No near-white -> transparent conversion
-3. Existing DACoN generated data is cleaned before preparation:
-       line/
-       ref/
-       seg/
-       pred/
-4. This prevents old segmentation / prediction results from being reused.
+1. The DACoN root is supplied with --cut-dir.
+2. The input TGA files are inside <CUT>_DACON/tga.
+3. The color reference is inside <CUT>_DACON/color_reference.
+4. The generated DACoN data is inside <CUT>_DACON/CUT_XX.
+5. No sibling DATA/CUT_XX directory is created by this script.
+6. RGB TGA -> RGB PNG.
+7. No near-white -> transparent conversion.
+8. Existing generated line/ref/seg/pred data is cleaned before preparation.
 """
 
+import argparse
 import shutil
 from pathlib import Path
 
@@ -51,46 +48,44 @@ from PIL import Image
 
 
 # ============================================================
-# PATH CONFIGURATION
+# PATH
 # ============================================================
 
-REF_PRJ = Path(
-    r"G:\paint_assistant\ref_prj"
-)
+def normalize_dacon_root(path):
+    """
+    Accept either:
 
-DATA_DIR = (
-    REF_PRJ /
-    "DATA"
-)
+        DATA/CUT_01_DACON
 
-# Default CUT
-CUT_NAME = "CUT_01"
+    or, for convenience:
 
-CUT_DIR = (
-    DATA_DIR /
-    CUT_NAME
-)
+        DATA/CUT_01_DACON/CUT_01
 
-TGA_DIR = (
-    CUT_DIR /
-    "tga"
-)
+    and always return:
 
-REFERENCE_DIR = (
-    CUT_DIR /
-    "color_reference"
-)
+        DATA/CUT_01_DACON
+    """
+    path = Path(path).expanduser().resolve()
 
-# DACoN output
-OUTPUT_ROOT = (
-    DATA_DIR /
-    f"{CUT_NAME}_DACON"
-)
+    if path.name.upper().endswith("_DACON"):
+        return path
 
-OUTPUT_DIR = (
-    OUTPUT_ROOT /
-    CUT_NAME
-)
+    if path.parent.name.upper() == f"{path.name}_DACON":
+        return path.parent
+
+    # Do not silently create DATA/CUT_XX.
+    # If a normal CUT path is supplied, derive its sibling DACoN root.
+    return path.parent / f"{path.name}_DACON"
+
+
+def get_cut_name(dacon_root):
+    name = dacon_root.name
+    if not name.upper().endswith("_DACON"):
+        raise ValueError(
+            f"Invalid DACoN root directory:\n{dacon_root}\n\n"
+            "Expected a directory named like CUT_01_DACON."
+        )
+    return name[:-6]
 
 
 # ============================================================
@@ -102,319 +97,196 @@ def print_line():
 
 
 def remove_directory(path):
-    """
-    Remove directory completely if it exists.
-    """
+    path = Path(path)
 
     if path.exists():
-
-        print(
-            f"Removing old directory: {path}"
-        )
-
+        print(f"Removing old directory: {path}")
         shutil.rmtree(path)
-
-        print(
-            f"Removed: {path}"
-        )
+        print(f"Removed: {path}")
 
 
 def ensure_directory(path):
+    Path(path).mkdir(parents=True, exist_ok=True)
+
+
+def copy_tga_to_png(source, target):
     """
-    Create directory.
-    """
+    Convert TGA to PNG without changing RGB values.
 
-    path.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-
-def copy_tga_to_png(
-    source,
-    target
-):
-    """
-    Convert TGA to PNG.
-
-    IMPORTANT:
-    RGB input stays RGB.
-
-    We deliberately DO NOT:
+    We deliberately do NOT:
         - create alpha
         - remove near-white
         - convert white to transparent
-        - modify RGB values
-
-    This is important for animation lineart.
+        - alter RGB values
     """
-
     with Image.open(source) as image:
-
         source_mode = image.mode
         source_size = image.size
 
-        # ----------------------------------------------------
-        # DACoN line input:
-        #
-        # Keep RGB as RGB.
-        #
-        # If the source happens to be another mode,
-        # convert to RGB.
-        # ----------------------------------------------------
-
         if image.mode != "RGB":
+            image = image.convert("RGB")
 
-            image = image.convert(
-                "RGB"
-            )
+        output_mode = image.mode
+        output_size = image.size
 
-        image.save(
-            target,
-            format="PNG"
-        )
+        image.save(target, format="PNG")
 
     return (
         source_mode,
         source_size,
-        image.mode,
-        image.size
+        output_mode,
+        output_size,
     )
 
 
 # ============================================================
-# FIND CUT
+# INPUT
 # ============================================================
 
-def find_tga_files():
+def find_tga_files(tga_dir):
+    tga_dir = Path(tga_dir)
 
-    if not TGA_DIR.exists():
-
+    if not tga_dir.exists():
         raise FileNotFoundError(
-            f"TGA directory not found:\n{TGA_DIR}"
+            f"TGA directory not found:\n{tga_dir}"
         )
 
     files = sorted(
         [
             p
-            for p in TGA_DIR.iterdir()
+            for p in tga_dir.iterdir()
             if p.is_file()
             and p.suffix.lower() == ".tga"
-        ]
+        ],
+        key=lambda p: p.name.lower(),
     )
 
     if not files:
-
         raise RuntimeError(
-            f"No TGA line frames found:\n{TGA_DIR}"
+            f"No TGA line frames found:\n{tga_dir}"
         )
 
     return files
 
 
-# ============================================================
-# FIND REFERENCE
-# ============================================================
-
-def find_reference_file(
-    line_files
-):
+def find_reference_file(reference_dir, line_files):
     """
-    Find color reference.
-
     Current rule:
 
     - take the first TGA from color_reference
-    - its filename stem is used to find the corresponding
+    - use its filename stem to find the corresponding
       line frame in tga/
 
     Example:
-
         color_reference/b0002.tga
-
-    ->
-
+            ->
         tga/b0002.tga
     """
+    reference_dir = Path(reference_dir)
 
-    if not REFERENCE_DIR.exists():
-
+    if not reference_dir.exists():
         raise FileNotFoundError(
-            f"Reference directory not found:\n"
-            f"{REFERENCE_DIR}"
+            f"Reference directory not found:\n{reference_dir}"
         )
 
     reference_files = sorted(
         [
             p
-            for p in REFERENCE_DIR.iterdir()
+            for p in reference_dir.iterdir()
             if p.is_file()
             and p.suffix.lower() == ".tga"
-        ]
+        ],
+        key=lambda p: p.name.lower(),
     )
 
     if not reference_files:
-
         raise RuntimeError(
-            f"No reference TGA found:\n"
-            f"{REFERENCE_DIR}"
+            f"No reference TGA found:\n{reference_dir}"
         )
 
     reference = reference_files[0]
-
-    reference_stem = (
-        reference.stem.lower()
-    )
+    reference_stem = reference.stem.lower()
 
     reference_line = None
 
     for line_file in line_files:
-
-        if (
-            line_file.stem.lower()
-            ==
-            reference_stem
-        ):
-
+        if line_file.stem.lower() == reference_stem:
             reference_line = line_file
-
             break
 
     if reference_line is None:
-
         raise RuntimeError(
-            "\n"
-            "Reference line not found.\n\n"
+            "\nReference line not found.\n\n"
             f"Reference image:\n"
             f"  {reference}\n\n"
             f"Expected corresponding line:\n"
-            f"  {TGA_DIR / (reference.stem + '.tga')}\n\n"
+            f"  {Path(line_files[0]).parent / (reference.stem + '.tga')}\n\n"
             "Please make sure the reference image and "
             "line frame use the same filename."
         )
 
-    return (
-        reference,
-        reference_line
-    )
+    return reference, reference_line
 
 
 # ============================================================
-# CLEAN OLD DACON DATA
+# CLEAN GENERATED DATA
 # ============================================================
 
-def clean_old_dacon_data():
+def clean_old_dacon_data(output_dir):
+    """
+    Only delete DACoN generated data.
 
+    Never delete:
+        <DACON_ROOT>/tga
+        <DACON_ROOT>/color_reference
+    """
     print()
-    print(
-        "Cleaning old DACoN generated data..."
-    )
-
+    print("Cleaning old DACoN generated data...")
     print()
-
-    # --------------------------------------------------------
-    # IMPORTANT
-    #
-    # We only delete generated folders.
-    #
-    # We DO NOT delete:
-    #
-    #   CUT_01
-    #   tga
-    #   color_reference
-    #
-    # --------------------------------------------------------
 
     folders_to_remove = [
-
-        OUTPUT_DIR / "line",
-
-        OUTPUT_DIR / "ref",
-
-        OUTPUT_DIR / "seg",
-
-        OUTPUT_DIR / "pred",
-
+        output_dir / "line",
+        output_dir / "ref",
+        output_dir / "seg",
+        output_dir / "pred",
     ]
 
     for folder in folders_to_remove:
-
-        remove_directory(
-            folder
-        )
+        remove_directory(folder)
 
     print()
-
-    print(
-        "Old DACoN data cleaned."
-    )
+    print("Old DACoN data cleaned.")
 
 
 # ============================================================
-# PREPARE LINE FRAMES
+# PREPARE LINE
 # ============================================================
 
-def prepare_line_frames(
-    line_files
-):
-
+def prepare_line_frames(line_files, output_dir):
     print()
-    print(
-        "[1/3] Preparing target line frames"
-    )
-
+    print("[1/3] Preparing target line frames")
     print()
 
-    output_line_dir = (
-        OUTPUT_DIR /
-        "line"
-    )
-
-    ensure_directory(
-        output_line_dir
-    )
+    output_line_dir = output_dir / "line"
+    ensure_directory(output_line_dir)
 
     for line_file in line_files:
+        print(line_file.name)
 
-        print(
-            line_file.name
-        )
-
-        output_file = (
-            output_line_dir /
-            f"{line_file.stem}.png"
-        )
+        output_file = output_line_dir / f"{line_file.stem}.png"
 
         (
             source_mode,
             source_size,
             output_mode,
-            output_size
-        ) = copy_tga_to_png(
-            line_file,
-            output_file
-        )
+            output_size,
+        ) = copy_tga_to_png(line_file, output_file)
 
-        print(
-            f"  source mode : {source_mode}"
-        )
-
-        print(
-            f"  source size : {source_size}"
-        )
-
-        print(
-            f"  output      : {output_file}"
-        )
-
-        print(
-            f"  output mode : {output_mode}"
-        )
-
-        print(
-            f"  output size : {output_size}"
-        )
-
+        print(f"  source mode : {source_mode}")
+        print(f"  source size : {source_size}")
+        print(f"  output      : {output_file}")
+        print(f"  output mode : {output_mode}")
+        print(f"  output size : {output_size}")
         print()
 
 
@@ -422,25 +294,12 @@ def prepare_line_frames(
 # PREPARE REFERENCE LINE
 # ============================================================
 
-def prepare_reference_line(
-    reference_line
-):
-
-    print(
-        "[2/3] Preparing reference line"
-    )
-
+def prepare_reference_line(reference_line, output_dir):
+    print("[2/3] Preparing reference line")
     print()
 
-    output_ref_line_dir = (
-        OUTPUT_DIR /
-        "ref" /
-        "line"
-    )
-
-    ensure_directory(
-        output_ref_line_dir
-    )
+    output_ref_line_dir = output_dir / "ref" / "line"
+    ensure_directory(output_ref_line_dir)
 
     output_file = (
         output_ref_line_dir /
@@ -451,36 +310,15 @@ def prepare_reference_line(
         source_mode,
         source_size,
         output_mode,
-        output_size
-    ) = copy_tga_to_png(
-        reference_line,
-        output_file
-    )
+        output_size,
+    ) = copy_tga_to_png(reference_line, output_file)
 
-    print(
-        reference_line.name
-    )
-
-    print(
-        f"  source mode : {source_mode}"
-    )
-
-    print(
-        f"  source size : {source_size}"
-    )
-
-    print(
-        f"  output      : {output_file}"
-    )
-
-    print(
-        f"  output mode : {output_mode}"
-    )
-
-    print(
-        f"  output size : {output_size}"
-    )
-
+    print(reference_line.name)
+    print(f"  source mode : {source_mode}")
+    print(f"  source size : {source_size}")
+    print(f"  output      : {output_file}")
+    print(f"  output mode : {output_mode}")
+    print(f"  output size : {output_size}")
     print()
 
 
@@ -488,25 +326,12 @@ def prepare_reference_line(
 # PREPARE REFERENCE COLOR
 # ============================================================
 
-def prepare_reference_color(
-    reference
-):
-
-    print(
-        "[3/3] Preparing reference color image"
-    )
-
+def prepare_reference_color(reference, output_dir):
+    print("[3/3] Preparing reference color image")
     print()
 
-    output_gt_dir = (
-        OUTPUT_DIR /
-        "ref" /
-        "gt"
-    )
-
-    ensure_directory(
-        output_gt_dir
-    )
+    output_gt_dir = output_dir / "ref" / "gt"
+    ensure_directory(output_gt_dir)
 
     output_file = (
         output_gt_dir /
@@ -517,182 +342,90 @@ def prepare_reference_color(
         source_mode,
         source_size,
         output_mode,
-        output_size
-    ) = copy_tga_to_png(
-        reference,
-        output_file
-    )
+        output_size,
+    ) = copy_tga_to_png(reference, output_file)
 
-    print(
-        reference.name
-    )
-
-    print(
-        f"  source mode : {source_mode}"
-    )
-
-    print(
-        f"  source size : {source_size}"
-    )
-
-    print(
-        f"  output      : {output_file}"
-    )
-
-    print(
-        f"  output mode : {output_mode}"
-    )
-
-    print(
-        f"  output size : {output_size}"
-    )
-
+    print(reference.name)
+    print(f"  source mode : {source_mode}")
+    print(f"  source size : {source_size}")
+    print(f"  output      : {output_file}")
+    print(f"  output mode : {output_mode}")
+    print(f"  output size : {output_size}")
     print()
 
 
 # ============================================================
-# COUNT PNG
+# COUNT / STRUCTURE
 # ============================================================
 
-def count_png_files():
+def count_png_files(output_root):
+    output_root = Path(output_root)
 
-    if not OUTPUT_ROOT.exists():
-
+    if not output_root.exists():
         return []
 
     return sorted(
-        OUTPUT_ROOT.rglob(
-            "*.png"
-        )
+        output_root.rglob("*.png"),
+        key=lambda p: str(p).lower(),
     )
 
 
-# ============================================================
-# PRINT STRUCTURE
-# ============================================================
-
-def print_structure():
-
+def print_structure(output_dir):
     print()
-    print(
-        "Expected structure"
-    )
-
+    print("Expected structure")
     print()
 
-    print(
-        OUTPUT_DIR
-    )
+    print(output_dir)
+    print("├── line")
 
-    print(
-        "├── line"
-    )
-
-    line_dir = (
-        OUTPUT_DIR /
-        "line"
-    )
-
+    line_dir = output_dir / "line"
     line_files = sorted(
-        line_dir.glob(
-            "*.png"
+        line_dir.glob("*.png"),
+        key=lambda p: p.name.lower(),
+    )
+
+    for index, file in enumerate(line_files):
+        prefix = (
+            "│   └── "
+            if index == len(line_files) - 1
+            else "│   ├── "
         )
-    )
+        print(prefix + file.name)
 
-    for index, file in enumerate(
-        line_files
-    ):
+    print("│")
+    print("└── ref")
+    print("    ├── line")
 
-        if index == len(line_files) - 1:
-
-            prefix = "│   └── "
-
-        else:
-
-            prefix = "│   ├── "
-
-        print(
-            prefix +
-            file.name
-        )
-
-    print(
-        "│"
-    )
-
-    print(
-        "└── ref"
-    )
-
-    print(
-        "    ├── line"
-    )
-
-    ref_line_dir = (
-        OUTPUT_DIR /
-        "ref" /
-        "line"
-    )
-
+    ref_line_dir = output_dir / "ref" / "line"
     ref_line_files = sorted(
-        ref_line_dir.glob(
-            "*.png"
+        ref_line_dir.glob("*.png"),
+        key=lambda p: p.name.lower(),
+    )
+
+    for index, file in enumerate(ref_line_files):
+        prefix = (
+            "    │   └── "
+            if index == len(ref_line_files) - 1
+            else "    │   ├── "
         )
-    )
+        print(prefix + file.name)
 
-    for index, file in enumerate(
-        ref_line_files
-    ):
+    print("    │")
+    print("    └── gt")
 
-        if index == len(ref_line_files) - 1:
-
-            prefix = "    │   └── "
-
-        else:
-
-            prefix = "    │   ├── "
-
-        print(
-            prefix +
-            file.name
-        )
-
-    print(
-        "    │"
-    )
-
-    print(
-        "    └── gt"
-    )
-
-    gt_dir = (
-        OUTPUT_DIR /
-        "ref" /
-        "gt"
-    )
-
+    gt_dir = output_dir / "ref" / "gt"
     gt_files = sorted(
-        gt_dir.glob(
-            "*.png"
-        )
+        gt_dir.glob("*.png"),
+        key=lambda p: p.name.lower(),
     )
 
-    for index, file in enumerate(
-        gt_files
-    ):
-
-        if index == len(gt_files) - 1:
-
-            prefix = "        └── "
-
-        else:
-
-            prefix = "        ├── "
-
-        print(
-            prefix +
-            file.name
+    for index, file in enumerate(gt_files):
+        prefix = (
+            "        └── "
+            if index == len(gt_files) - 1
+            else "        ├── "
         )
+        print(prefix + file.name)
 
 
 # ============================================================
@@ -700,235 +433,151 @@ def print_structure():
 # ============================================================
 
 def main():
-
-    print(
-        "=" * 70
+    parser = argparse.ArgumentParser(
+        description="Prepare a DACoN CUT."
+    )
+    parser.add_argument(
+        "--cut-dir",
+        required=True,
+        help=(
+            "DACoN root directory, e.g. "
+            r"G:\paint_assistant\DATA\CUT_01_DACON"
+        ),
     )
 
-    print(
-        "DACoN CUT Preparation"
-    )
+    args = parser.parse_args()
 
-    print(
-        "=" * 70
-    )
+    dacon_root = normalize_dacon_root(args.cut_dir)
 
-    print()
-
-    print(
-        f"CUT_DIR       : {CUT_DIR}"
-    )
-
-    print(
-        f"TGA_DIR       : {TGA_DIR}"
-    )
-
-    print(
-        f"REFERENCE_DIR : {REFERENCE_DIR}"
-    )
-
-    print(
-        f"OUTPUT_DIR    : {OUTPUT_DIR}"
-    )
-
-    print()
-
-    # ========================================================
-    # CHECK INPUT
-    # ========================================================
-
-    if not CUT_DIR.exists():
-
-        raise FileNotFoundError(
-            f"CUT directory not found:\n{CUT_DIR}"
+    if dacon_root.name.upper().endswith("_DACON") is False:
+        raise ValueError(
+            f"Invalid DACoN root:\n{dacon_root}"
         )
 
-    line_files = (
-        find_tga_files()
-    )
+    cut_name = get_cut_name(dacon_root)
 
-    (
-        reference,
-        reference_line
-    ) = find_reference_file(
-        line_files
-    )
+    # IMPORTANT:
+    # Input and output are both contained inside CUT_XX_DACON.
+    tga_dir = dacon_root / "tga"
+    reference_dir = dacon_root / "color_reference"
+    output_root = dacon_root
+    output_dir = dacon_root / cut_name
 
-    # ========================================================
-    # INPUT INFORMATION
-    # ========================================================
+    print("=" * 70)
+    print("DACoN CUT Preparation")
+    print("=" * 70)
+    print()
 
-    print_line()
+    print(f"DACON_ROOT    : {dacon_root}")
+    print(f"TGA_DIR       : {tga_dir}")
+    print(f"REFERENCE_DIR : {reference_dir}")
+    print(f"OUTPUT_DIR    : {output_dir}")
+    print()
 
-    print(
-        "Input information"
-    )
+    # Safety check: this script must not write to a sibling CUT_XX.
+    sibling_basic_cut = dacon_root.parent / cut_name
 
-    print_line()
+    print(f"Sibling CUT check: {sibling_basic_cut}")
 
-    print(
-        f"Line frames      : {len(line_files)}"
-    )
-
-    for file in line_files:
-
+    if sibling_basic_cut.exists():
         print(
-            f"  - {file.name}"
+            "NOTE: A sibling CUT directory already exists. "
+            "This script will NOT modify or delete it."
         )
 
     print()
 
-    print(
-        f"Reference        : {reference.name}"
+    if not dacon_root.exists():
+        raise FileNotFoundError(
+            f"DACoN root directory not found:\n{dacon_root}\n\n"
+            "Create the DACoN template first."
+        )
+
+    line_files = find_tga_files(tga_dir)
+
+    reference, reference_line = find_reference_file(
+        reference_dir,
+        line_files,
     )
 
-    print(
-        f"Reference line   : {reference_line.name}"
-    )
+    print_line()
+    print("Input information")
+    print_line()
+
+    print(f"Line frames      : {len(line_files)}")
+    for file in line_files:
+        print(f"  - {file.name}")
 
     print()
+    print(f"Reference        : {reference.name}")
+    print(f"Reference line   : {reference_line.name}")
+    print()
 
-    # ========================================================
-    # CLEAN OLD DATA
-    # ========================================================
+    # Clean only generated DACoN data inside CUT_XX_DACON/CUT_XX.
+    clean_old_dacon_data(output_dir)
 
-    clean_old_dacon_data()
-
-    # ========================================================
-    # PREPARE
-    # ========================================================
-
+    # Prepare
     prepare_line_frames(
-        line_files
+        line_files,
+        output_dir,
     )
 
     prepare_reference_line(
-        reference_line
+        reference_line,
+        output_dir,
     )
 
     prepare_reference_color(
-        reference
+        reference,
+        output_dir,
     )
 
-    # ========================================================
-    # COMPLETE
-    # ========================================================
-
-    print(
-        "=" * 70
-    )
-
-    print(
-        "PREPARATION COMPLETE"
-    )
-
-    print(
-        "=" * 70
-    )
-
+    print("=" * 70)
+    print("PREPARATION COMPLETE")
+    print("=" * 70)
     print()
 
-    print(
-        "DACoN input directory:"
-    )
-
-    print(
-        OUTPUT_DIR
-    )
-
-    # ========================================================
-    # GENERATED FILES
-    # ========================================================
-
-    png_files = (
-        count_png_files()
-    )
-
+    print("DACoN input directory:")
+    print(output_root)
     print()
 
-    print(
-        "Generated files:"
-    )
+    png_files = count_png_files(output_dir)
 
+    print("Generated files:")
     print()
 
     for file in png_files:
-
-        print(
-            file
-        )
+        print(file)
 
     print()
-
-    print(
-        f"Total PNG files: {len(png_files)}"
-    )
-
-    # ========================================================
-    # STRUCTURE
-    # ========================================================
+    print(f"Total PNG files: {len(png_files)}")
 
     print()
-
-    print(
-        "=" * 70
-    )
-
-    print_structure()
-
-    # ========================================================
-    # NEXT STEP
-    # ========================================================
+    print("=" * 70)
+    print_structure(output_dir)
 
     print()
-
-    print(
-        "Next step:"
-    )
-
+    print("=" * 70)
+    print("Next step:")
     print(
         "python dacon\\inference.py "
         "--config configs\\inference.yaml "
         "--model checkpoints\\dacon_v1_1.pth "
-        f"--data {OUTPUT_ROOT} "
+        f"--data {output_root} "
         "--version 1_1"
     )
-
     print()
 
 
-# ============================================================
-# ENTRY
-# ============================================================
-
 if __name__ == "__main__":
-
     try:
-
         main()
-
     except Exception as e:
-
         print()
-
-        print(
-            "=" * 70
-        )
-
-        print(
-            "ERROR"
-        )
-
-        print(
-            "=" * 70
-        )
-
+        print("=" * 70)
+        print("ERROR")
+        print("=" * 70)
         print()
-
-        print(
-            str(e)
-        )
-
+        print(str(e))
         print()
-
         raise
